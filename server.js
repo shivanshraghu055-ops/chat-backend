@@ -1,101 +1,81 @@
-const http = require("http");
-const { Server } = require("socket.io");
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
 
-const server = http.createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ status: "ok", online: io.engine.clientsCount }));
-  }
-  res.writeHead(200);
-  res.end("ConnectMP Chat Server");
-});
+const app = express();
+const server = http.createServer(app);
 
+// ✅ CORS FIX (IMPORTANT)
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: "*", // later you can restrict
+    methods: ["GET", "POST"]
+  }
 });
 
-// City-based waiting queues
-const queues = { bhopal: [], indore: [] };
-// Maps socket.id → partner socket.id
-const partners = {};
+// ✅ Health check (for uptime robot)
+app.get("/", (req, res) => {
+  res.send("Server is running ✅");
+});
 
-function findPartner(socket, city) {
-  const queue = queues[city] || [];
-  // Remove stale entries & self
-  while (queue.length && (!queue[0].connected || queue[0].id === socket.id)) {
-    queue.shift();
-  }
-  if (queue.length) {
-    const partner = queue.shift();
-    partners[socket.id] = partner.id;
-    partners[partner.id] = socket.id;
-    socket.emit("matched", { message: `Connected with a stranger from ${city}!` });
-    partner.emit("matched", { message: `Connected with a stranger from ${city}!` });
-  } else {
-    queue.push(socket);
-    socket.emit("waiting", { message: "Searching for someone…" });
-  }
-}
-
-function disconnectPair(socketId) {
-  const partnerId = partners[socketId];
-  if (partnerId) {
-    delete partners[socketId];
-    delete partners[partnerId];
-    const partnerSocket = io.sockets.sockets.get(partnerId);
-    if (partnerSocket) {
-      partnerSocket.emit("partner_disconnected");
-    }
-  }
-  // Remove from all queues
-  for (const city in queues) {
-    queues[city] = queues[city].filter((s) => s.id !== socketId);
-  }
-}
+// ✅ Queue system
+let waitingUsers = [];
 
 io.on("connection", (socket) => {
-  console.log(`Connected: ${socket.id}`);
+  console.log("User connected:", socket.id);
 
-  socket.on("join", ({ city }) => {
-    const c = (city || "bhopal").toLowerCase();
-    socket.data.city = c;
-    findPartner(socket, c);
-  });
+  // 🔥 USER REQUESTS MATCH
+  socket.on("find-partner", () => {
+    console.log("User wants partner:", socket.id);
 
-  socket.on("message", ({ text }) => {
-    const partnerId = partners[socket.id];
-    if (partnerId) {
-      io.to(partnerId).emit("message", { text, from: socket.id });
+    // If someone is waiting → match them
+    if (waitingUsers.length > 0) {
+      const partner = waitingUsers.shift();
+
+      socket.partner = partner;
+      partner.partner = socket;
+
+      // Notify both users
+      socket.emit("matched", { partnerId: partner.id });
+      partner.emit("matched", { partnerId: socket.id });
+
+      console.log("Matched:", socket.id, "with", partner.id);
+    } else {
+      // No one waiting → add to queue
+      waitingUsers.push(socket);
+      console.log("User added to queue:", socket.id);
     }
   });
 
-  socket.on("typing", () => {
-    const partnerId = partners[socket.id];
-    if (partnerId) io.to(partnerId).emit("typing");
-  });
-
-  socket.on("stop_typing", () => {
-    const partnerId = partners[socket.id];
-    if (partnerId) io.to(partnerId).emit("stop_typing");
-  });
-
-  socket.on("skip", () => {
-    disconnectPair(socket.id);
-    const city = socket.data.city || "bhopal";
-    findPartner(socket, city);
-  });
-
-  socket.on("report", ({ reason }) => {
-    const partnerId = partners[socket.id];
-    console.log(`Report: ${socket.id} reported ${partnerId} — ${reason}`);
-    // In production, log to DB
-  });
-
+  // 🔥 HANDLE DISCONNECT
   socket.on("disconnect", () => {
-    console.log(`Disconnected: ${socket.id}`);
-    disconnectPair(socket.id);
+    console.log("User disconnected:", socket.id);
+
+    // Remove from waiting queue
+    waitingUsers = waitingUsers.filter(u => u.id !== socket.id);
+
+    // Notify partner if exists
+    if (socket.partner) {
+      socket.partner.emit("partner-disconnected");
+      socket.partner.partner = null;
+    }
+  });
+
+  // 🔥 OPTIONAL: next user button
+  socket.on("next", () => {
+    if (socket.partner) {
+      socket.partner.emit("partner-disconnected");
+      socket.partner.partner = null;
+      socket.partner = null;
+    }
+
+    // find new partner again
+    socket.emit("find-partner");
   });
 });
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ✅ Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+});
