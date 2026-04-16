@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: connectmp-server
-    runtime: node
-    buildCommand: npm install
-    startCommand: node server.js
-    envVars:
-      - key: PORT
-        value: 3001
